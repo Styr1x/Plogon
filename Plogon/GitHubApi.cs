@@ -1,10 +1,10 @@
-﻿using System;
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Net.Http.Json;
-using System.Text.Json.Serialization;
 using System.Threading.Tasks;
-using Serilog;
+
+using Octokit;
 
 namespace Plogon;
 
@@ -13,86 +13,239 @@ namespace Plogon;
 /// </summary>
 public class GitHubApi
 {
-    private readonly HttpClient client;
+    private readonly string repoOwner;
+    private readonly string repoName;
+    private readonly GitHubClient ghClient;
 
     /// <summary>
     /// Make new GitHub API
     /// </summary>
+    /// <param name="repoOwner">owner of the repo</param>
+    /// <param name="repoName">name of the repo</param>
     /// <param name="token">Github token</param>
-    public GitHubApi(string token)
+    public GitHubApi(string repoOwner, string repoName, string token)
     {
-        this.client = new HttpClient()
+        this.repoOwner = repoOwner;
+        this.repoName = repoName;
+        this.ghClient = new GitHubClient(new ProductHeaderValue("PlogonBuild", "1.0.0"))
         {
-            DefaultRequestHeaders =
-            {
-                Accept = { new MediaTypeWithQualityHeaderValue("application/vnd.github+json") },
-                UserAgent = { new ProductInfoHeaderValue("PlogonBuild", "1.0.0") },
-                Authorization = new AuthenticationHeaderValue("token", token),
-            }
+            Credentials = new Credentials(token)
         };
     }
-
-    private class CommentCreateBody
-    {
-        public string? Body { get; set; }
-    }
+    
+    /// <summary>
+    /// Authenticated GitHub client.
+    /// </summary>
+    public GitHubClient Client => this.ghClient;
+    
+    /// <summary>
+    /// Repo owner.
+    /// </summary>
+    public string RepoOwner => this.repoOwner;
+    
+    /// <summary>
+    /// Repo name.
+    /// </summary>
+    public string RepoName => this.repoName;
 
     /// <summary>
     /// Add comment to issue
     /// </summary>
-    /// <param name="repo">The repo to use</param>
     /// <param name="issueNumber">The issue number</param>
     /// <param name="body">The body</param>
-    public async Task AddComment(string repo, int issueNumber, string body)
+    public async Task AddComment(int issueNumber, string body)
     {
-        var jsonBody = new CommentCreateBody()
-        {
-            Body = body,
-        };
-        
-        var request = new HttpRequestMessage(HttpMethod.Post,
-            $"https://api.github.com/repos/{repo}/issues/{issueNumber}/comments");
-        request.Content = JsonContent.Create(jsonBody);
+        await this.ghClient.Issue.Comment.Create(repoOwner, repoName, issueNumber, body);
+    }
 
-        var response = await this.client.SendAsync(request);
-        //Log.Verbose("{Repo}, {PrNum}: {Resp}", repo, issueNumber, await response.Content.ReadAsStringAsync());
-        
-        response.EnsureSuccessStatusCode();
+    /// <summary>
+    /// For all comments left by the current user on an issue/PR, put them into a "details" md fold.
+    /// </summary>
+    /// <param name="issueNumber">issue/pr number</param>
+    public async Task<bool> CrossOutAllOfMyComments(int issueNumber)
+    {
+        var me = await this.ghClient.User.Current();
+        if (me == null)
+            throw new Exception("Couldn't get auth'd user");
+
+        var comments = await this.ghClient.Issue.Comment.GetAllForIssue(repoOwner, repoName, issueNumber);
+        if (comments == null)
+            throw new Exception("Couldn't get issue comments");
+
+        var any = false;
+        foreach (var comment in comments)
+        {
+            if (comment.User.Id != me.Id)
+                continue;
+            any = true;
+
+            // Only do this once
+            if (comment.Body.StartsWith("<details>"))
+                continue;
+
+            var newComment = $"<details>\n<summary>Outdated attempt</summary>\n\n{comment.Body}\n</details>";
+            await this.ghClient.Issue.Comment.Update(repoOwner, repoName, comment.Id, newComment);
+        }
+
+        return any;
     }
 
     /// <summary>
     /// Retrieves a diff as string for a given pull request
     /// </summary>
-    /// <param name="repo">The repo to use</param>
     /// <param name="prNum">The pull request number</param>
     /// <returns></returns>
-    public async Task<string> GetPullRequestDiff(string repo, string prNum)
+    public async Task<string> GetPullRequestDiff(string prNum)
     {
-        return await this.client.GetStringAsync($"https://github.com/{repo}/pull/{prNum}.diff");
-    }
-
-    private class IssueResponse
-    {
-        [JsonPropertyName("body")] public string? Body { get; set; }
+        using var client = new HttpClient();
+        return await client.GetStringAsync($"https://github.com/{repoOwner}/{repoName}/pull/{prNum}.diff");
     }
 
     /// <summary>
     /// Get the body of an issue.
     /// </summary>
-    /// <param name="repo">Repo name</param>
     /// <param name="issueNumber">Issue number</param>
     /// <returns>PR body</returns>
     /// <exception cref="Exception">Thrown when the body couldn't be read</exception>
-    public async Task<string> GetIssueBody(string repo, int issueNumber)
+    public async Task<string> GetIssueBody(int issueNumber)
     {
-        var request = new HttpRequestMessage(HttpMethod.Get,
-            $"https://api.github.com/repos/{repo}/issues/{issueNumber}");
-        var response = await this.client.SendAsync(request);
-        Log.Verbose("{Repo}, {PrNum}: {Resp}", repo, issueNumber, await response.Content.ReadAsStringAsync());
-        
-        response.EnsureSuccessStatusCode();
+        var pr = await this.ghClient.PullRequest.Get(repoOwner, repoName, issueNumber);
+        if (pr == null)
+            throw new Exception("Could not get PR");
 
-        var body = await response.Content.ReadFromJsonAsync<IssueResponse>();
-        return body?.Body ?? string.Empty;
+        return pr.Body;
+    }
+
+    /// <summary>
+    /// Get the PR for a given number.
+    /// </summary>
+    /// <param name="number">The PR number.</param>
+    /// <returns>The PR.</returns>
+    public async Task<PullRequest?> GetPullRequest(int number)
+    {
+        return await this.ghClient.PullRequest.Get(repoOwner, repoName, number);
+    }
+    
+    /// <summary>
+    /// Add an assignee.
+    /// </summary>
+    /// <param name="number">The PR number.</param>
+    /// <param name="assignee">GitHub login to assign.</param>
+    public async Task Assign(int number, string assignee)
+    {
+        await this.ghClient.Issue.Assignee.AddAssignees(repoOwner, repoName, number, new AssigneesUpdate(new []{ assignee }));
+    }
+
+    /// <summary>
+    /// Labels for DIP17 PRs
+    /// </summary>
+    [Flags]
+    public enum PrLabel
+    {
+        /// <summary>
+        /// No label
+        /// </summary>
+        None = 0,
+
+        /// <summary>
+        /// "new plugin"
+        /// </summary>
+        NewPlugin = 1 << 0,
+
+        /// <summary>
+        /// "need icon"
+        /// </summary>
+        NeedIcon = 1 << 1,
+
+        /// <summary>
+        /// "build failed"
+        /// </summary>
+        BuildFailed = 1 << 2,
+
+        /// <summary>
+        /// "version conflict"
+        /// </summary>
+        VersionConflict = 1 << 3,
+
+        /// <summary>
+        /// "move channel"
+        /// </summary>
+        MoveChannel = 1 << 4,
+
+        /// <summary>
+        /// "size-s"
+        /// </summary>
+        SizeSmall = 1 << 5,
+
+        /// <summary>
+        /// "size-m"
+        /// </summary>
+        SizeMid = 1 << 6,
+
+        /// <summary>
+        /// "size-l"
+        /// </summary>
+        SizeLarge = 1 << 7
+    }
+
+    /// <summary>
+    /// Set the PR labels on a PR. Existing unmanaged labels are preserved.
+    /// </summary>
+    /// <param name="issueNumber">pr/issue number</param>
+    /// <param name="label">labels to set</param>
+    public async Task SetPrLabels(int issueNumber, PrLabel label)
+    {
+        var managedLabels = new HashSet<string>();
+
+        var existing = await this.ghClient.Issue.Labels.GetAllForIssue(repoOwner, repoName, issueNumber);
+        if (existing != null)
+        {
+            foreach (var existingLabel in existing)
+            {
+                managedLabels.Add(existingLabel.Name);
+            }
+        }
+
+        if (label.HasFlag(PrLabel.NewPlugin))
+            managedLabels.Add(PlogonSystemDefine.PR_LABEL_NEW_PLUGIN);
+        else
+            managedLabels.Remove(PlogonSystemDefine.PR_LABEL_NEW_PLUGIN);
+
+        if (label.HasFlag(PrLabel.NeedIcon))
+            managedLabels.Add(PlogonSystemDefine.PR_LABEL_NEED_ICON);
+        else
+            managedLabels.Remove(PlogonSystemDefine.PR_LABEL_NEED_ICON);
+
+        if (label.HasFlag(PrLabel.BuildFailed))
+            managedLabels.Add(PlogonSystemDefine.PR_LABEL_BUILD_FAILED);
+        else
+            managedLabels.Remove(PlogonSystemDefine.PR_LABEL_BUILD_FAILED);
+
+        if (label.HasFlag(PrLabel.VersionConflict))
+            managedLabels.Add(PlogonSystemDefine.PR_LABEL_VERSION_CONFLICT);
+        else
+            managedLabels.Remove(PlogonSystemDefine.PR_LABEL_VERSION_CONFLICT);
+
+        if (label.HasFlag(PrLabel.MoveChannel))
+            managedLabels.Add(PlogonSystemDefine.PR_LABEL_MOVE_CHANNEL);
+        else
+            managedLabels.Remove(PlogonSystemDefine.PR_LABEL_MOVE_CHANNEL);
+
+        if (label.HasFlag(PrLabel.SizeSmall))
+            managedLabels.Add(PlogonSystemDefine.PR_LABEL_SIZE_SMALL);
+        else
+            managedLabels.Remove(PlogonSystemDefine.PR_LABEL_SIZE_SMALL);
+
+        if (label.HasFlag(PrLabel.SizeMid))
+            managedLabels.Add(PlogonSystemDefine.PR_LABEL_SIZE_MID);
+        else
+            managedLabels.Remove(PlogonSystemDefine.PR_LABEL_SIZE_MID);
+
+        if (label.HasFlag(PrLabel.SizeLarge))
+            managedLabels.Add(PlogonSystemDefine.PR_LABEL_SIZE_LARGE);
+        else
+            managedLabels.Remove(PlogonSystemDefine.PR_LABEL_SIZE_LARGE);
+
+        await this.ghClient.Issue.Labels.ReplaceAllForIssue(repoOwner, repoName, issueNumber, managedLabels.ToArray());
     }
 }

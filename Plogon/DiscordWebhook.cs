@@ -1,5 +1,6 @@
-﻿using System;
+using System;
 using System.Threading.Tasks;
+
 using Discord;
 using Discord.Webhook;
 
@@ -13,14 +14,17 @@ public class DiscordWebhook
     /// <summary>
     /// Webhook client
     /// </summary>
-    public DiscordWebhookClient Client { get; }
+    public DiscordWebhookClient? Client { get; }
 
     /// <summary>
     /// Init with webhook from env var
     /// </summary>
-    public DiscordWebhook()
+    public DiscordWebhook(string? url)
     {
-        this.Client = new DiscordWebhookClient(Environment.GetEnvironmentVariable("DISCORD_WEBHOOK"));
+        if (string.IsNullOrEmpty(url))
+            return;
+
+        this.Client = new DiscordWebhookClient(url);
     }
 
     private static DateTime GetPacificStandardTime()
@@ -30,7 +34,7 @@ public class DiscordWebhook
         var pacificTime = TimeZoneInfo.ConvertTimeFromUtc(utc, pacificZone);
         return pacificTime;
     }
-    
+
     /// <summary>
     /// Send a webhook
     /// </summary>
@@ -40,6 +44,9 @@ public class DiscordWebhook
     /// <param name="footer"></param>
     public async Task<ulong> Send(Color color, string message, string title, string footer)
     {
+        if (this.Client == null)
+            throw new Exception("Webhooks not set up");
+
         var embed = new EmbedBuilder()
             .WithColor(color)
             .WithTitle(title)
@@ -55,7 +62,7 @@ public class DiscordWebhook
             username = "Gon";
             avatarUrl = "https://goatcorp.github.io/icons/gon.png";
         }
-        
+
         return await this.Client.SendMessageAsync(embeds: new[] { embed }, username: username, avatarUrl: avatarUrl);
     }
 }

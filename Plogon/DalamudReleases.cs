@@ -1,11 +1,13 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Threading.Tasks;
+
 using Serilog;
+
 using Tomlyn;
 
 namespace Plogon;
@@ -18,36 +20,30 @@ public class DalamudReleases
     private const string URL_TEMPLATE = "https://kamori.goats.dev/Dalamud/Release/VersionInfo?track={0}";
 
     private readonly Overrides? overrides;
-    
+
     private class Overrides
     {
-        public Overrides()
-        {
-            ChannelTracks = new Dictionary<string, string>();
-        }
-        
-        public Dictionary<string, string> ChannelTracks { get; set; }
+        public Dictionary<string, string> ChannelTracks { get; set; } = new();
     }
 
     /// <summary>
     /// ctor
     /// </summary>
+    /// <param name="overridesFile">File containing overrides.</param>
     /// <param name="releasesDir">Where releases should go</param>
-    /// <param name="manifestsDir">Where manifests are from</param>
-    public DalamudReleases(DirectoryInfo releasesDir, DirectoryInfo manifestsDir)
+    public DalamudReleases(FileInfo overridesFile, DirectoryInfo releasesDir)
     {
         this.ReleasesDir = releasesDir;
 
-        var overridesFile = new FileInfo(Path.Combine(manifestsDir.FullName, "overrides.toml"));
         if (overridesFile.Exists)
             this.overrides = Toml.ToModel<Overrides>(overridesFile.OpenText().ReadToEnd());
     }
-    
+
     /// <summary>
     /// Where releases go
     /// </summary>
     public DirectoryInfo ReleasesDir { get; }
-    
+
     private async Task<DalamudVersionInfo?> GetVersionInfoForTrackAsync(string track)
     {
         var dalamudTrack = "release";
@@ -56,7 +52,7 @@ public class DalamudReleases
             dalamudTrack = mapping;
             Log.Information("Overriding channel {Track} Dalamud track with {NewTrack}", track, dalamudTrack);
         }
-        
+
         using var client = new HttpClient();
         return await client.GetFromJsonAsync<DalamudVersionInfo>(string.Format(URL_TEMPLATE, dalamudTrack));
     }
@@ -72,12 +68,12 @@ public class DalamudReleases
         var versionInfo = await this.GetVersionInfoForTrackAsync(track);
         if (versionInfo == null)
             throw new Exception("Could not get Dalamud version info");
-        
+
         var extractDir = this.ReleasesDir.CreateSubdirectory($"{track}-{versionInfo.AssemblyVersion}");
 
         if (extractDir.GetFiles().Length != 0)
             return extractDir;
-        
+
         Log.Information("Downloading Dalamud assembly for track {Track}({Version})", track, versionInfo.AssemblyVersion);
 
         using var client = new HttpClient();
@@ -90,7 +86,7 @@ public class DalamudReleases
 
         return extractDir;
     }
-    
+
     private class DalamudVersionInfo
     {
 #pragma warning disable CS8618
